@@ -1,0 +1,1487 @@
+Настройка ISP
+
+hostnamectl set-hostname isp.au.team
+ip a - смотрим ens наши
+cd /etc/net/ifaces/ переходим по каталогу
+touch ens19, ens20, ens21, ens22 создаем по интерфейсам папки
+cd ens19 переходим в ens19
+
+создаем 4 папки
+ipv4address - dhcp (т.к этот порт в интернетный)
+ipv4route - dhcp(шлюз для нашего порта, т.к он не постоянный поэтому dhcp)
+options - ~
+resolv.conf - nameserver 77.88.8.8 (ya.ru)
+
+~
+TYPE=eth - тип ethernet, типо тип порта
+BOOTPROTO=static - тип ip маршрутизации (для ens19 - dhcp)
+CONFIG_IPV4=yes - IPv4, по заданию нужен он
+CONFIG_IPV6=no - IPv4
+DISABLED=no - отключен или нет порт
+NM_CONTROLLED=no - NetworkManagerController: поидее, если потом нужно чтобы он управлял, то там yes
+~
+cp -r ens19/. dir20 - копируем файлы из 19 порта в 20, т.к настройка у них одинаковая
+cp -r ens20/. dir21 - копируем файлы из 20 порта в 21
+cp -r ens21/. dir22 - копируем файлы из 21 порта в 22
+
+поскольку ens20, ens21, ens22 это статичные порты со статичным ip адресом, то:
+ipv4address - указываем по заданию (например 5.5.5.1/26)
+rm ipv4route на портах ens20, ens21, ens22
+BOOTPROTO=static в каждом ставим
+
+После настройки всех файлов для каждого порта:
+systemctl restart network
+
+ip link set ens20 up - для запуска порта ens20
+ip link set ens21 up - для запуска порта ens21
+ip link set ens22 up - для запуска порта ens22
+
+NAT на isp для выхода устройств в интернет
+
+есть 2 норм способа: iptables и firewalld
+
+iptables удобен тем что не конфликтует, но не удобен в настройке и сохранении настроек
+firewalld может конфликтовать и не запускаться, но удобнее в настройке и сам сохраняет настройки
+
+берем firewalld:
+
+apt-get install firewalld (возможно нужно сначала сделать apt-get update/upgrade)
+systemctl status firewalld он будет выключен - включаем: systemctl start firewalld
+systemctl enable firewalld - добавление в автозапуск
+systemctl status firewalld - тут возможно все равно не включится из-да отсутствия работы ipforwarding:
+
+vim /etc/sysctl.conf -> раскомментировать строку #net.ipv4.ip_forward = 1
+sysctl -p - применить изменения
+
+Теперь сама настройка NAT:
+ens19 интернетный, поэтому на нем MASQUERADE 
+ens20,21,22 не интернетные поэтому у них будут просто зоны
+
+Создаем 4 зоны на каждый интерфейс:
+firewall-cmd --permanent --new-zone=out (ens19)- out, значит внешний
+firewall-cmd --permanent --new-zone=in4 (ens20) - число указывает на ip который имеет интерфейс этой зоны (4.4.4.1)
+firewall-cmd --permanent --new-zone=in5 (ens21)
+firewall-cmd --permanent --new-zone=in6 (ens22)
+
+На каждую созданную зону нужно назначить соответствующий интерфейс:
+firewall-cmd --permanent --zone=out --change-interface=ens19 - для ens19 зона out, т.к внешняя зона
+firewall-cmd --permanent --zone=in4 --change-interface=ens20
+firewall-cmd --permanent --zone=in5 --change-interface=ens21
+firewall-cmd --permanent --zone=in6 --change-interface=ens22
+
+Осталось указать MASQUERADE интерфейс:
+firewall-cmd --permanent --zone=out --add-masquerade - masquerade(значит замаскированный, тоесть переодеваемый интерфейс с белого ip на локальные ip)
+
+Так то NAT настроен, но нет перессылки между интерфейсами для маршрутизации, поэтому добавим forwarding:
+firewall-cmd --permanent --zone=in4 --add-forward-port=port=80:proto=tcp:toport=80:toaddr=4.4.4.1
+
+Параметр zone указывает зону для forwarding
+Параметр add-forward-port указывает определенный порт, который может маршрутирировать с этой зоной, но нам нужно чтобы они все маршрутизировали, поэтому:
+add-forward-port=port=80 - указываем общий 80 (80 порт он стандартный)
+Параметр proto=tcp - указываем протокол tcp, а не udp
+Параметр toport=80 - это для какого порта указали протокол tcp
+Параметр toaddr=4.4.4.1 - укажет какой ip стоит за этой зоной прикрепленной к общему 80 порту
+так для всех зон:
+firewall-cmd --permanent --zone=in5 --add-forward-port=port=80:proto=tcp:toport=80:toaddr=5.5.5.1
+firewall-cmd --permanent --zone=in6 --add-forward-port=port=80:proto=tcp:toport=80:toaddr=6.6.6.1
+
+И наконец, разрешаем трафик между внутренними зонами и внешней зоной:
+firewall-cmd --permanent --zone=in4 --add-source=4.4.4.0/28
+firewall-cmd --permanent --zone=in5 --add-source=5.5.5.0/26
+firewall-cmd --permanent --zone=in6 --add-source=6.6.6.0/29
+Параметр add-source укажет ip сеть которая стоит за определенной зоной, вот и всё :)
+
+Перезагрузим NAT: firewall-cmd --reload
+
+А если хотим проверить NAT, вот команда:
+firewall-cmd --zone=out --list-all
+firewall-cmd --zone=in4 --list-all
+firewall-cmd --zone=in5 --list-all
+firewall-cmd --zone=in6 --list-all
+
+########### Настройка HQ ###########
+
+########### HQ-RTR ###########
+
+configure
+
+hostname hq-rtr
+domain name au.team
+
+interface gi1/0/1
+ip address 4.4.4.2/28
+no shutdown
+exit
+
+interface gi1/0/2
+no shutdown
+exit
+interface gi1/0/2.10
+ip address 192.168.101.30/27
+exit
+interface gi1/0/2.20
+ip address 192.168.100.254/24
+exit
+interface gi1/0/2.99
+ip address 192.168.101.38/29
+exit
+
+ip route 0.0.0.0/0 4.4.4.1
+
+do com
+do con
+
+username sshuser
+password P@$$w0rd
+privilege 15
+exit
+
+do com
+do con
+
+security zone WAN
+exit
+security zone LAN
+exit
+
+interface gi1/0/1
+security-zone WAN
+exit
+interface gi1/0/2.10
+security-zone LAN
+exit
+interface gi1/0/2.20
+security-zone LAN
+exit
+interface gi1/0/2.99
+security-zone LAN
+exit
+
+object-group network LAN
+ip prefix 192.168.100.0/23
+exit
+
+nat source
+ruleset MASQUERADE
+to interface gi1/0/1
+rule 10
+match source-address LAN
+action source-nat interface
+enable
+exit
+exit
+exit
+
+do com
+do con
+
+security zone-pair WAN self 
+rule 1 
+match protocol icmp
+match source-address LAN
+match destination-address any
+action permit 
+enable 
+exit 
+exit
+
+security zone-pair LAN self
+rule 1
+match protocol any
+match source-address any
+match destination-address any
+action permit
+enable
+exit
+exit
+
+security zone-pair LAN LAN
+rule 1
+match protocol any
+match source-address any
+match destination-address any
+action permit
+enable
+exit
+exit
+
+do com
+do con
+
+########### HQ-SW1 ###########
+
+#Задаем имя согласно топологии
+
+hostnamectl set-hostname hq-sw1.au.team
+
+#Создаем пользователя sshuser
+
+adduser sshuser
+passwd sshuser
+Вводим пароль P@$$w0rd
+Повторяем пароль P@$$w0rd
+
+#Добавляем пользователя в группу wheel (чтобы иметь доступ к sudo)
+
+usermod -aG wheel sshuser
+
+#Разрешаем пользователю sshuser запуст sudo без пароля
+
+visudo
+...
+sshuser	ALL=(ALL:ALL) NOPASSWD: ALL	#Последянн строчка
+
+
+#Настраиваем временный интерфейс для подулючения HQ-SW1 к Интернету
+
+cd /etc/net/iface
+mkdir ens19.99
+cd ens19.99
+
+vim options
+
+TYPE=vlan
+HOST=eth19
+VID=99
+BOOTPROTO=static
+
+vim ipv4address
+
+192.168.101.34/29
+
+vim ipv4route
+
+default via 192.168.101.38
+
+vim resolv.conf
+
+nameserver 77.88.8.8
+
+systemctl restart network
+
+ip add
+
+ping 8.8.8.8
+
+#Обновляем репозитории
+
+apt-get update
+
+#Устанавливаем и настраиваем openvswitch
+
+apt-get install openvswitch
+
+cd ~
+rm -rf /etc/net/iface/ens19.99
+reboot
+
+systemctl enable --now openvswitch
+systemctl status openvswitch
+
+ip add
+
+#Интерфейсы:
+#ens19 - HQ-RTR;
+#ens20 - HQ-SRV1 - vlan10;
+#ens21 - HQ-SRV2 - vlan10;
+#ens22 - HQ-CLI - vlan20;
+
+mkdir /etc/net/ifaces/ens{19,20,21,22}
+mkdir /etc/net/ifaces/HQ-SW1
+mkdir /etc/net/ifaces/vlan99
+
+sed -i "s/OVS_REMOVE=yes/OVS_REMOVE=no/g" /etc/net/ifaces/default/options
+
+vim /etc/net/ifaces/HQ-SW1/options
+TYPE=ovsbr
+HOST='ens19 ens20 ens21 ens22'
+
+vim /etc/net/ifaces/vlan99/options
+TYPE=ovsport
+BOOTPROTO=static
+CONFIG_IPV4=yes
+BRIDGE=HQ-SW1
+VID=99
+
+cp /etc/net/ifaces/ens19/options /etc/net/ifaces/ens20/
+cp /etc/net/ifaces/ens19/options /etc/net/ifaces/ens21/
+cp /etc/net/ifaces/ens19/options /etc/net/ifaces/ens22/
+
+echo 192.168.101.33/29 > /etc/net/ifaces/vlan99/ipv4address
+echo default via 192.168.101.38 > /etc/net/ifaces/vlan99/ipv4route
+echo nameserver 77.88.8.8 > /etc/net/ifaces/vlan99/resolv.conf
+
+systemctl restart network
+
+ovs-vsctl show
+
+ovs-vsctl set port ens19 trunk=10,20,99
+ovs-vsctl set port ens20 tag=10
+ovs-vsctl set port ens21 tag=10
+ovs-vsctl set port ens22 tag=20
+
+reboot
+
+ovs-vsctl show
+
+
+########### HQ-RTR ###########
+
+
+#Блокируем доступ коммутатора HQ-SW к интернету
+
+configure
+
+object-group network SW
+ip address-range 192.168.101.33
+exit
+
+nat source
+ruleset MASQUERADE
+rule 9
+match source-address SW
+action source-nat off
+enable
+exit
+exit
+exit
+
+do com
+do con
+
+
+################ HQ-SRV1 #####################
+
+hostnamectl set-hostname hq-srv1.au.team
+
+echo 192.168.101.1/27 > /etc/net/ifaces/ens19/ipv4address
+echo default via 192.168.101.30 > /etc/net/ifaces/ens19/ipv4route
+
+#Назначаем временный DNS
+echo nameserver 77.88.8.8 > /etc/net/ifaces/ens19/resolv.conf
+
+systemctl restart network 
+
+ip add
+
+ping ya.ru
+
+
+################ HQ-SRV2 #####################
+
+hostnamectl set-hostname hq-srv2.au.team
+
+echo 192.168.101.2/27 > /etc/net/ifaces/ens19/ipv4address
+echo default via 192.168.101.30 > /etc/net/ifaces/ens19/ipv4route
+
+#Назначаем временный DNS
+echo nameserver 77.88.8.8 > /etc/net/ifaces/ens19/resolv.conf
+
+systemctl restart network 
+
+ip add
+
+ping ya.ru
+ping 192.168.101.1
+ping 192.168.101.33
+
+
+################ HQ-SRV1 #####################
+
+#Обновляем репозитории
+
+apt-get update
+
+#Устанавливаем и настраиваем DHCP Server
+
+apt-get install dhcp-server
+
+cp /etc/dhcp/dhcpd.conf.sample /etc/dhcp/dhcpd.conf
+
+vim /etc/dhcp/dhcpd.conf
+
+subnet 192.168.101.0 netmask 255.255.255.224 {
+}
+
+subnet 192.168.100.0 netmask 255.255.255.0 { 	#сеть и маска подсети
+option routers 192.168.100.254; 		#адрес маршрутизатора
+option subnet-mask 255.255.255.0; 		#маска подсети
+option domain-name "au.team"; 			#домен
+option domain-name-servers 192.168.101.2; 	#DNS-сервера для клиентов
+range 192.168.100.1 192.168.100.253; 		#диапазон DHCP-подсети
+}
+
+subnet 192.168.101.32 netmask 255.255.255.248 {
+option routers 192.168.101.38;
+option subnet-mask 255.255.255.248;
+option domain-name "au.team";
+option domain-name-servers 192.168.101.2;
+range dynamic-bootp 192.168.101.34 192.168.100.37;
+
+#ручное резервирование адресов
+host hq-sw1 {
+hardware ethernet C6:3B:71:B6:6F:DE;
+fixed-address 192.168.101.33;
+}
+}
+
+
+vim /etc/sysconfig/dhcpd
+
+DHCPDARGS=ens19
+
+systemctl enable --now dhcpd
+systemctl status dhcpd
+
+
+########### HQ-RTR ###########
+
+configure
+
+ip dhcp-relay
+
+int gi1/0/2.20
+ip helper-address 192.168.101.1
+exit
+
+int gi1/0/2.99
+ip helper-address 192.168.101.1
+exit
+
+do com
+do con
+
+
+########### HQ-CLI ###########
+
+#Пробуем получить адрес по DHCP
+
+ip add
+
+ping 192.168.100.254
+ping 192.168.101.30
+ping 192.168.101.38
+
+su	#Вводим пароль от пользователя root
+
+hostnamectl hq-cli.au.team
+bash
+
+########### HQ-SW1 ###########
+
+rm -rf /etc/net/ifaces/vlan99/ipv4*
+rm -rf /etc/net/ifaces/vlan99/resolv.conf
+
+vim /etc/net/ifaces/vlan99/options
+
+BOOTPROTO=dhcp
+
+systemctl restart network
+
+ip add
+
+
+################ HQ-SRV2 #####################
+
+#Обновляем репозитории
+
+apt-get update
+
+#Устанавливаем и настраиваем DNS Server
+
+apt-get install bind
+apt-get install bind-utils
+
+vim /etc/bind/options.conf
+
+listen-on { any; };
+listen-on-v6 { none; };
+
+forward first;
+forwarders { 94.232.137.104; 94.232.137.105; };
+
+allow-query { any; };
+allow-query-cache { any; };
+allow-recursion { any; };
+
+systemctl enable --now bind
+systemctl status bind
+
+#Проверка
+host ya.ru 127.0.0.1
+
+#Меняем в сетевых настройках временный DNS на наш
+
+vim /etc/net/iface/ens19/resolv.conf
+
+search au.team
+nameserver 127.0.0.1
+
+systemctl restart network
+systemctl restart bind
+
+#Проверка
+cat /etc/resolv.conf
+host ya.ru
+
+
+################ HQ-SRV1 #####################
+
+#Меняем в сетевых настройках временный DNS на наш
+
+vim /etc/net/iface/ens19/resolv.conf
+
+search au.team
+nameserver 192.168.101.2
+
+systemctl restart network
+
+#Проверка
+cat /etc/resolv.conf
+ping ya.ru
+
+
+########### HQ-RTR ###########
+
+#Блокировка YouTube и Bittprrent
+
+object-group url BLACK
+regexp 'youtube.com'
+regexp 'bittorrent.com'
+exit
+
+ip http profile SITE
+default action permit
+urls local BLACK action deny
+exit
+
+interface gi1/0/2.10
+ip http proxy SITE
+ip https proxy SITE
+exit
+
+interface gi1/0/2.20
+ip http proxy SITE
+ip https proxy SITE
+exit
+
+do com
+do con
+
+########### HQ-CLI ###########
+
+#Проверяем блокировку YouTube и Bittprrent
+#В браузере пробуем зайти на страницу ya.ru (доступ должен быть)
+#В браузере пробуем зайти на страницу youtube.com (доступ быть не должно)
+#В браузере пробуем зайти на страницу bittorrent.com (доступ быть не должно)
+
+
+
+########### Настройка ЦОД ###########
+
+########### DC-RTR ###########
+
+configure
+
+hostname dc-rtr
+domain name au.team
+
+interface gi1/0/1
+ip address 6.6.6.2/29
+no shutdown
+exit
+
+interface gi1/0/2
+ip address 172.30.20.1/22
+no shutdown
+exit
+
+ip route 0.0.0.0/0 6.6.6.1
+
+do com
+do con
+
+username sshuser
+password P@$$w0rd
+privilege 15
+exit
+
+do com
+do con
+
+security zone WAN
+exit
+
+interface gi1/0/1
+security-zone WAN
+exit
+interface gi1/0/2
+ip firewall disable
+exit
+
+object-group network LAN
+ip prefix 172.30.20.0/22
+exit
+
+nat source
+ruleset MASQUERADE
+to interface gi1/0/1
+rule 10
+match source-address LAN
+action source-nat interface
+enable
+exit
+exit
+exit
+
+do com
+do con
+
+security zone-pair WAN self 
+rule 1 
+match protocol icmp
+match source-address LAN
+match destination-address any
+action permit 
+enable 
+exit 
+exit
+
+do com
+do con
+
+
+########### DC-SW1 ###########
+
+#Задаем имя согласно топологии
+
+hostnamectl set-hostname dc-sw1.au.team
+
+#Создаем пользователя sshuser
+
+adduser sshuser
+passwd sshuser
+Вводим пароль P@$$w0rd
+Повторяем пароль P@$$w0rd
+
+#Добавляем пользователя в группу wheel (чтобы иметь доступ к sudo)
+
+usermod -aG wheel sshuser
+
+#Разрешаем пользователю sshuser запуст sudo без пароля
+
+visudo
+...
+sshuser	ALL=(ALL:ALL) NOPASSWD: ALL	#Последянн строчка
+
+
+#Настраиваем временный интерфейс для подулючения DC-SW1 к Интернету
+
+vim /etc/net/iface/ens19/ipv4address
+
+172.30.20.2/22
+
+vim /etc/net/iface/ens19/ipv4route
+
+default via 172.30.20.1
+
+vim /etc/net/iface/ens19/resolv.conf
+
+nameserver 77.88.8.8
+
+systemctl restart network
+
+ip add
+
+ping 8.8.8.8
+
+#Обновляем репозитории
+
+apt-get update
+
+#Устанавливаем и настраиваем openvswitch
+
+apt-get install openvswitch
+
+systemctl enable --now openvswitch
+systemctl status openvswitch
+
+rm -rf /etc/net/iface/ens19/ipv4*
+rm -rf /etc/net/iface/ens19/resolv.conf
+
+ip add
+
+#Интерфейсы:
+#ens19 - DC-RTR
+#ens20 - DC-SRV1
+#ens21 - DC-SRV2
+#ens22 - DC-SRV3
+
+mkdir /etc/net/ifaces/ens{19,20,21,22}
+mkdir /etc/net/ifaces/DC-SW1
+
+sed -i "s/OVS_REMOVE=yes/OVS_REMOVE=no/g" /etc/net/ifaces/default/options
+
+vim /etc/net/ifaces/DC-SW1/options
+TYPE=ovsbr
+HOST='ens19 ens20 ens21 ens22'
+
+cp /etc/net/ifaces/ens19/options /etc/net/ifaces/ens20/
+cp /etc/net/ifaces/ens19/options /etc/net/ifaces/ens21/
+cp /etc/net/ifaces/ens19/options /etc/net/ifaces/ens22/
+
+echo 172.30.20.2/22 > /etc/net/ifaces/DC-SW1/ipv4address
+echo default via 172.30.20.1 > /etc/net/ifaces/DC-SW1/ipv4route
+echo nameserver 77.88.8.8 > /etc/net/ifaces/DC-SW1/resolv.conf
+
+systemctl restart network
+
+ovs-vsctl show
+
+
+################ DC-SRV1 #####################
+
+hostnamectl set-hostname dc-srv1.au.team
+
+vim /etc/hosts
+
+172.30.20.3	dc-srv1.au.team	dc-srv1
+172.30.20.4	dc-srv2.au.team	dc-srv2
+172.30.20.5	dc-srv3.au.team	dc-srv3
+
+
+echo 172.30.20.3/22 > /etc/net/ifaces/vmbr0/ipv4address
+echo default via 172.30.20.1 > /etc/net/ifaces/vmbr0/ipv4route
+
+#Назначаем временный DNS
+echo nameserver 77.88.8.8 > /etc/net/ifaces/vmbr0/resolv.conf
+
+systemctl restart network 
+
+ip add
+
+ping ya.ru
+
+
+################ DC-SRV2 #####################
+
+hostnamectl set-hostname dc-srv2.au.team
+
+vim /etc/hosts
+
+172.30.20.3	dc-srv1.au.team	dc-srv1
+172.30.20.4	dc-srv2.au.team	dc-srv2
+172.30.20.5	dc-srv3.au.team	dc-srv3
+
+
+echo 172.30.20.4/22 > /etc/net/ifaces/vmbr0/ipv4address
+echo default via 172.30.20.1 > /etc/net/ifaces/vmbr0/ipv4route
+
+#Назначаем временный DNS
+echo nameserver 77.88.8.8 > /etc/net/ifaces/vmbr0/resolv.conf
+
+systemctl restart network 
+
+ip add
+
+ping ya.ru
+
+
+################ DC-SRV3 #####################
+
+hostnamectl set-hostname dc-srv3.au.team
+
+vim /etc/hosts
+
+172.30.20.3	dc-srv1.au.team	dc-srv1
+172.30.20.4	dc-srv2.au.team	dc-srv2
+172.30.20.5	dc-srv3.au.team	dc-srv3
+
+
+echo 172.30.20.5/22 > /etc/net/ifaces/vmbr0/ipv4address
+echo default via 172.30.20.1 > /etc/net/ifaces/vmbr0/ipv4route
+
+#Назначаем временный DNS
+echo nameserver 77.88.8.8 > /etc/net/ifaces/vmbr0/resolv.conf
+
+systemctl restart network 
+
+ip add
+
+ping ya.ru
+
+
+########### Настройка BR ###########
+
+########### BR-RTR ###########
+
+configure
+
+hostname br-rtr
+domain name au.team
+
+interface gi1/0/1
+ip address 5.5.5.2/26
+no shutdown
+exit
+
+interface gi1/0/2
+no shutdown
+exit
+interface gi1/0/2.10
+ip address 192.168.200.78/28
+exit
+interface gi1/0/2.20
+ip address 192.168.200.62/26
+exit
+interface gi1/0/2.99
+ip address 192.168.200.86/29
+exit
+
+ip route 0.0.0.0/0 5.5.5.1
+
+do com
+do con
+
+username sshuser
+password P@$$w0rd
+privilege 15
+exit
+
+do com
+do con
+
+security zone WAN
+exit
+security zone LAN
+exit
+
+interface gi1/0/1
+security-zone WAN
+exit
+interface gi1/0/2.10
+security-zone LAN
+exit
+interface gi1/0/2.20
+security-zone LAN
+exit
+interface gi1/0/2.99
+security-zone LAN
+exit
+
+object-group network LAN
+ip prefix 192.168.200.0/25
+exit
+
+nat source
+ruleset MASQUERADE
+to interface gi1/0/1
+rule 10
+match source-address LAN
+action source-nat interface
+enable
+exit
+exit
+exit
+
+do com
+do con
+
+security zone-pair WAN self 
+rule 1 
+match protocol icmp
+match source-address LAN
+match destination-address any
+action permit 
+enable 
+exit 
+exit
+
+security zone-pair LAN self
+rule 1
+match protocol any
+match source-address any
+match destination-address any
+action permit
+enable
+exit
+exit
+
+security zone-pair LAN LAN
+rule 1
+match protocol any
+match source-address any
+match destination-address any
+action permit
+enable
+exit
+exit
+
+do com
+do con
+
+########### BR-SW1 ###########
+
+#Задаем имя согласно топологии
+
+hostnamectl set-hostname br-sw1.au.team
+
+#Создаем пользователя sshuser
+
+adduser sshuser
+passwd sshuser
+Вводим пароль P@$$w0rd
+Повторяем пароль P@$$w0rd
+
+#Добавляем пользователя в группу wheel (чтобы иметь доступ к sudo)
+
+usermod -aG wheel sshuser
+
+#Разрешаем пользователю sshuser запуст sudo без пароля
+
+visudo
+...
+sshuser	ALL=(ALL:ALL) NOPASSWD: ALL	#Последянн строчка
+
+
+#Настраиваем временный интерфейс для подулючения BR-SW1 к Интернету
+
+cd /etc/net/iface
+mkdir ens19.99
+cd ens19.99
+
+vim options
+
+TYPE=vlan
+HOST=ens19
+VID=99
+BOOTPROTO=static
+
+vim ipv4address
+
+192.168.200.82/29
+
+vim ipv4route
+
+default via 192.168.200.86
+
+vim resolv.conf
+
+nameserver 77.88.8.8
+
+systemctl restart network
+
+ip add
+
+ping 8.8.8.8
+
+#Обновляем репозитории
+
+apt-get update
+
+#Устанавливаем и выполняем временную настройку openvswitch
+
+apt-get install openvswitch
+
+cd ~
+rm -rf /etc/net/iface/ens19.99
+reboot
+
+systemctl enable --now openvswitch
+systemctl status openvswitch
+
+ip add
+
+#Интерфейсы:
+#ens19 - BR-RTR - trunk10,20,99;
+#ens20 - BR-SW2-1 - trunk10,20,99;
+#ens21 - BR-SW2-2 - trunk10,20,99;
+#ens22 - BR-SRV - vlan10;
+
+mkdir /etc/net/ifaces/ens{19,20}
+mkdir /etc/net/ifaces/BR-SW1
+mkdir /etc/net/ifaces/vlan99
+
+sed -i "s/OVS_REMOVE=yes/OVS_REMOVE=no/g" /etc/net/ifaces/default/options
+
+vim /etc/net/ifaces/BR-SW1/options
+TYPE=ovsbr
+HOST='ens19 ens20'
+
+vim /etc/net/ifaces/vlan99/options
+TYPE=ovsport
+BOOTPROTO=static
+CONFIG_IPV4=yes
+BRIDGE=BR-SW1
+VID=99
+
+cp /etc/net/ifaces/ens19/options /etc/net/ifaces/ens20/
+
+echo 192.168.200.82/29 > /etc/net/ifaces/vlan99/ipv4address
+echo default via 192.168.200.86 > /etc/net/ifaces/vlan99/ipv4route
+echo nameserver 77.88.8.8 > /etc/net/ifaces/vlan99/resolv.conf
+
+systemctl restart network
+
+ovs-vsctl show
+
+ovs-vsctl set port ens19 trunk=10,20,99
+
+ovs-vsctl show
+
+
+########### BR-SW2 ###########
+
+#Задаем имя согласно топологии
+
+hostnamectl set-hostname br-sw2.au.team
+
+#Создаем пользователя sshuser
+
+adduser sshuser
+passwd sshuser
+Вводим пароль P@$$w0rd
+Повторяем пароль P@$$w0rd
+
+#Добавляем пользователя в группу wheel (чтобы иметь доступ к sudo)
+
+usermod -aG wheel sshuser
+
+#Разрешаем пользователю sshuser запуст sudo без пароля
+
+visudo
+...
+sshuser	ALL=(ALL:ALL) NOPASSWD: ALL	#Последянн строчка
+
+
+#Настраиваем временный интерфейс для подулючения BR-SW2 к Интернету
+
+cd /etc/net/iface
+mkdir ens19.99
+cd ens19.99
+
+vim options
+
+TYPE=vlan
+HOST=ens19
+VID=99
+BOOTPROTO=static
+
+vim ipv4address
+
+192.168.200.83/29
+
+vim ipv4route
+
+default via 192.168.200.86
+
+vim resolv.conf
+
+nameserver 77.88.8.8
+
+systemctl restart network
+
+ip add
+
+ping 8.8.8.8
+
+#Обновляем репозитории
+
+apt-get update
+
+#Устанавливаем openvswitch
+
+apt-get install openvswitch
+
+cd ~
+rm -rf /etc/net/iface/ens19.99
+reboot
+
+systemctl enable --now openvswitch
+systemctl status openvswitch
+
+
+
+########### BR-SW1 ###########
+
+#Перенастраиваем openvswitch согласно заданию
+
+#Интерфейсы:
+#ens19 - BR-RTR - trunk10,20,99;
+#ens20 - BR-SW2-1 - bond0 - trunk10,20,99;
+#ens21 - BR-SW2-2 - bond0 - trunk10,20,99;
+#ens22 - BR-SRV - vlan10;
+
+ovs-vsctl show
+
+ovs-vsctl del-port ens20
+
+ovs-vsctl show
+
+mkdir /etc/net/ifaces/ens{21,22}
+
+cp /etc/net/ifaces/ens19/options /etc/net/ifaces/ens21/
+cp /etc/net/ifaces/ens19/options /etc/net/ifaces/ens22/
+
+vim /etc/net/ifaces/BR-SW1/options
+HOST='ens19 ens22'
+
+mkdir /etc/net/ifaces/bond0
+
+vim /etc/net/ifaces/bond0/options
+TYPE=ovsbond
+BRIDGE=BR-SW1
+HOST='ens20 ens21'
+OVS_EXTRA='set port bond0 lacp=active -- set port bond0 bond_mode=balance-tcp -- set port bond0 other_config:lacp-fallback-ab=true -- set port bond0 trunk=10,20,99'
+
+systemctl restart network
+
+ovs-vsctl show
+
+ovs-vsctl set port ens22 tag=10
+
+ovs-vsctl show
+ovs-appctl bond/show
+ovs-appctl lacp/show
+
+
+
+########### BR-SW2 ###########
+
+#Настраиваем openvswitch согласно заданию
+
+ip add
+
+#Интерфейсы:
+#ens19 - BR-SW1-1 - bond0 - trunk10,20,99;
+#ens20 - BR-SW1-2 - bond0 - trunk10,20,99;
+#ens21 - BR-CLI - vlan20;
+
+mkdir /etc/net/ifaces/ens{19,20,21}
+mkdir /etc/net/ifaces/BR-SW2
+mkdir /etc/net/ifaces/vlan99
+
+sed -i "s/OVS_REMOVE=yes/OVS_REMOVE=no/g" /etc/net/ifaces/default/options
+
+vim /etc/net/ifaces/BR-SW2/options
+TYPE=ovsbr
+HOST='ens21'
+
+vim /etc/net/ifaces/vlan99/options
+TYPE=ovsport
+BOOTPROTO=static
+CONFIG_IPV4=yes
+BRIDGE=BR-SW2
+VID=99
+
+cp /etc/net/ifaces/ens19/options /etc/net/ifaces/ens20/
+cp /etc/net/ifaces/ens19/options /etc/net/ifaces/ens21/
+
+echo 192.168.200.83/29 > /etc/net/ifaces/vlan99/ipv4address
+echo default via 192.168.200.86 > /etc/net/ifaces/vlan99/ipv4route
+echo nameserver 77.88.8.8 > /etc/net/ifaces/vlan99/resolv.conf
+
+mkdir /etc/net/ifaces/bond0
+
+vim /etc/net/ifaces/bond0/options
+TYPE=ovsbond
+BRIDGE=BR-SW2
+HOST='ens19 ens20'
+OVS_EXTRA='set port bond0 lacp=passive -- set port bond0 bond_mode=balance-tcp -- set port bond0 other_config:lacp-fallback-ab=true -- set port bond0 trunk=10,20,99'
+
+
+systemctl restart network
+
+ovs-vsctl show
+
+ovs-vsctl set port ens21 tag=20
+
+ovs-vsctl show
+ovs-appctl bond/show
+ovs-appctl lacp/show
+
+ping 192.168.200.86
+ping 8.8.8.8
+
+
+
+################ BR-SRV #####################
+
+hostnamectl set-hostname br-srv.au.team
+
+echo 192.168.200.65/28 > /etc/net/ifaces/ens19/ipv4address
+echo default via 192.168.200.78 > /etc/net/ifaces/ens19/ipv4route
+
+#Назначаем временный DNS
+echo nameserver 77.88.8.8 > /etc/net/ifaces/ens19/resolv.conf
+
+systemctl restart network 
+
+ip add
+
+ping ya.ru
+
+
+#Обновляем репозитории
+
+apt-get update
+
+#Устанавливаем и настраиваем DNS Server
+
+apt-get install bind
+apt-get install bind-utils
+
+vim /etc/bind/options.conf
+
+listen-on { any; };
+listen-on-v6 { none; };
+
+forward first;
+forwarders { 94.232.137.104; 94.232.137.105; };
+
+allow-query { any; };
+allow-query-cache { any; };
+allow-recursion { any; };
+
+systemctl enable --now bind
+systemctl status bind
+
+#Проверка
+host ya.ru 127.0.0.1
+
+#Меняем в сетевых настройках временный DNS на наш
+
+vim /etc/net/iface/ens19/resolv.conf
+
+search au.team
+nameserver 127.0.0.1
+
+systemctl restart network
+systemctl restart bind
+
+#Проверка
+cat /etc/resolv.conf
+host ya.ru
+
+
+#Устанавливаем и настраиваем DHCP Server
+
+apt-get install dhcp-server
+
+cp /etc/dhcp/dhcpd.conf.sample /etc/dhcp/dhcpd.conf
+
+vim /etc/dhcp/dhcpd.conf
+
+subnet 192.168.200.64 netmask 255.255.255.240 {
+}
+
+subnet 192.168.200.0 netmask 255.255.255.192 { 	#сеть и маска подсети
+option routers 192.168.200.62; 			#адрес маршрутизатора
+option subnet-mask 255.255.255.192; 		#маска подсети
+option domain-name "au.team"; 			#домен
+option domain-name-servers 192.168.200.65; 	#DNS-сервера для клиентов
+range 192.168.200.1 192.168.200.61; 		#диапазон DHCP-подсети
+}
+
+subnet 192.168.200.80 netmask 255.255.255.248 {
+option routers 192.168.200.86;
+option subnet-mask 255.255.255.248;
+option domain-name "au.team";
+option domain-name-servers 192.168.200.65;
+range dynamic-bootp 192.168.200.83 192.168.100.85;
+
+#ручное резервирование адресов
+host br-sw1 {
+hardware ethernet 56:8d:77:80:ed:7a;
+fixed-address 192.168.200.81;
+}
+host br-sw2 {
+hardware ethernet c2:2d:b9:bc:ac:62;
+fixed-address 192.168.200.82;
+}
+
+}
+
+vim /etc/sysconfig/dhcpd
+
+DHCPDARGS=ens19
+
+systemctl enable --now dhcpd
+systemctl status dhcpd
+
+
+########### BR-RTR ###########
+
+configure
+
+ip dhcp-relay
+
+int gi1/0/2.20
+ip helper-address 192.168.200.65
+exit
+
+int gi1/0/2.99
+ip helper-address 192.168.200.65
+exit
+
+do com
+do con
+
+
+########### BR-SW1 ###########
+
+rm -rf /etc/net/ifaces/vlan99/ipv4*
+rm -rf /etc/net/ifaces/vlan99/resolv.conf
+
+vim /etc/net/ifaces/vlan99/options
+
+BOOTPROTO=dhcp
+
+systemctl restart network
+
+ip add
+
+
+########### BR-SW2 ###########
+
+rm -rf /etc/net/ifaces/vlan99/ipv4*
+rm -rf /etc/net/ifaces/vlan99/resolv.conf
+
+vim /etc/net/ifaces/vlan99/options
+
+BOOTPROTO=dhcp
+
+systemctl restart network
+
+ip add
+
+
+########### BR-RTR ###########
+
+
+#Блокируем доступ коммутатора BR-SW1 и BR-SW2 к интернету
+
+configure
+
+object-group network SW1
+ip address-range 192.168.200.81
+exit
+
+object-group network SW2
+ip address-range 192.168.200.82
+exit
+
+nat source
+ruleset MASQUERADE
+rule 8
+match source-address SW1
+action source-nat off
+enable
+exit
+rule 9
+match source-address SW2
+action source-nat off
+enable
+exit
+exit
+exit
+
+do com
+do con
+
+#Проверяем на BR-SW1 и BR-SW2 интернет должен пропасть (ping 8.8.8.8 не должен работать!!!)
+
+
+########### BR-RTR ###########
+
+#Блокировка YouTube и Bittprrent
+
+object-group url BLACK
+regexp 'youtube.com'
+regexp 'bittorrent.com'
+exit
+
+ip http profile SITE
+default action permit
+urls local BLACK action deny
+exit
+
+interface gi1/0/2.10
+ip http proxy SITE
+ip https proxy SITE
+exit
+
+interface gi1/0/2.20
+ip http proxy SITE
+ip https proxy SITE
+exit
+
+do com
+do con
+
+
+########### BR-CLI ###########
+
+#Пробуем получить адрес по DHCP
+
+ip add
+
+su	#Вводим пароль от пользователя root
+
+hostnamectl br-cli.au.team
+bash
+
+#Проверяем блокировку YouTube и Bittprrent
+#В браузере пробуем зайти на страницу ya.ru (доступ должен быть)
+#В браузере пробуем зайти на страницу youtube.com (доступ быть не должно)
+#В браузере пробуем зайти на страницу bittorrent.com (доступ быть не должно)
+
+
+########### BR-RTR ###########
+
+#Доступ по SSH к серверу BR-SRV из внешних сетей
+
+configure
+
+object-group network WAN_IP
+ip address-range 5.5.5.2
+exit
+object-group service WAN_SSH
+port-range 65000
+exit
+
+object-group network BR_SRV
+ip address 192.168.200.65
+exit
+
+nat destination
+pool SSH_BR_SRV
+ip address 192.168.200.65
+ip port 22
+exit
+ruleset DNAT	
+from zone WAN
+rule 1
+match protocol tcp
+match destination-address WAN_IP
+match destination-port WAN_SSH
+action destination-nat pool SSH_BR_SRV
+enable
+exit
+exit
+exit
+
+do com
+do con
+
+security zone-pair WAN LAN
+rule 1
+match destination-address BR-SRV
+match destination-nat
+action permit
+enable
+exit
+exit
+
+do com
+do con
